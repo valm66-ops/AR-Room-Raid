@@ -38,6 +38,9 @@ body.playing .hud{display:flex}
 #ovBtn{pointer-events:auto;height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--glass);color:var(--ink);font:700 12px 'Chakra Petch',sans-serif}
 #ovBtn[aria-pressed=true]{border-color:#3fd0ff;color:#3fd0ff}
 #vsStart{font-size:13px;opacity:.8;margin-top:10px}
+#hint{position:fixed;left:50%;top:58%;transform:translateX(-50%);width:min(86vw,340px);text-align:center;padding:12px 14px;border-radius:12px;background:var(--glass);border:1px solid rgba(255,150,40,.6);font-size:15px;line-height:1.35;font-weight:500;opacity:0;transition:opacity .3s;pointer-events:none}
+#hint.show{opacity:1}
+#hint b{color:#ff9628}
 #toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 90px);transform:translateX(-50%);padding:8px 14px;border-radius:10px;background:var(--glass);border:1px solid var(--line);font-size:14px;opacity:0;transition:opacity .3s;pointer-events:none;white-space:nowrap}
 #toast.show{opacity:1}
 .ov{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:calc(env(safe-area-inset-top) + 20px) 20px calc(env(safe-area-inset-bottom) + 20px);background:radial-gradient(120% 80% at 50% 20%,rgba(60,12,10,.92),rgba(5,7,10,.97) 70%);z-index:10;overflow-y:auto}
@@ -79,6 +82,7 @@ body.playing .hud{display:flex}
 </div>
 <div id="banner"><h2 id="bT"></h2><p id="bS"></p></div>
 <div id="toast"></div>
+<div id="hint"><b>Find an entrance.</b> Point at a doorway or down a hallway. That's where they'll come through.</div>
 
 <div class="ov" id="startOv">
   <div class="card">
@@ -270,11 +274,16 @@ function processFrame(pose,{lab,lw,lh,disp,dw,dh}){
   V.frame={pose,lab,lw,lh,tg};
 }
 const binOf=a=>((Math.floor((a+Math.PI)/(2*Math.PI)*BINS)%BINS)+BINS)%BINS;
-function pickSpawn(spread){
-  const h=heading(),now=performance.now(),c=[];
-  for(let i=0;i<BINS;i++){const b=bins[i],ang=(i+.5)/BINS*2*Math.PI-Math.PI;if(Math.abs(wrap(ang-h))>spread)continue;
-    if(b.door&&now-b.door.t<90000)c.push({p:b.door,w:3,wp:null});
-    if(b.far&&b.far.r>2.2&&now-b.far.t<90000)c.push({p:b.far,w:b.far.r>4?2.5:1,wp:b.door&&b.door.r<b.far.r-1?b.door:null})}
+function entrances(){
+  const now=performance.now(),c=[];
+  for(let i=0;i<BINS;i++){const b=bins[i];
+    const d=b.door&&now-b.door.t<120000?b.door:null;
+    if(d)c.push({p:d,k:'door',w:3,wp:null});
+    if(b.far&&now-b.far.t<120000&&(b.far.r>=4.2||(d&&b.far.r>d.r+.8)))c.push({p:b.far,k:'hall',w:2.5,wp:d&&d.r<b.far.r-.8?d:null})}
+  return c;
+}
+function pickSpawn(){
+  const c=entrances();
   if(!c.length)return null;
   let s=c.reduce((a,x)=>a+x.w,0)*Math.random();for(const x of c){s-=x.w;if(s<=0)return x}return c[0];
 }
@@ -324,8 +333,8 @@ function nextWave(){
 }
 function spawn(){
   const s=st,n=s.wave,spread=n===1?.9:n===2?1.8:Math.PI;
-  const pk=pickSpawn(spread);let x,y,wp=null;
-  if(pk){const j=(Math.random()-.5)*.6,r=Math.hypot(pk.p.x,pk.p.y),ux=pk.p.x/r,uy=pk.p.y/r;x=pk.p.x*.95-uy*j;y=pk.p.y*.95+ux*j;wp=pk.wp?{x:pk.wp.x,y:pk.wp.y}:null}
+  const pk=pickSpawn();let x,y,wp=null;
+  if(pk){const j=(Math.random()-.5)*(pk.k==='door'?.25:.5),r=Math.hypot(pk.p.x,pk.p.y),ux=pk.p.x/r,uy=pk.p.y/r,f=pk.k==='door'?1.04:.95;x=pk.p.x*f-uy*j;y=pk.p.y*f+ux*j;wp=pk.wp?{x:pk.wp.x,y:pk.wp.y}:null}
   else{const a=heading()+(Math.random()*2-1)*spread,b=bins[binOf(a)],r=b.maxR>2?b.maxR*.9:3.5;x=Math.cos(a)*r;y=Math.sin(a)*r}
   const drone=n>=2&&Math.random()<Math.min(.45,.12*n);
   s.enemies.push({type:drone?'drone':'grunt',x,y,wp,z:0,hp:drone?1:3,spawn:.9,
@@ -367,7 +376,7 @@ function fire(){
   if(s.ammo===0)setTimeout(startReload,250);
 }
 function gameOver(){
-  const s=st;s.over=true;running=false;document.body.classList.remove('playing');
+  const s=st;s.over=true;running=false;$('hint').classList.remove('show');document.body.classList.remove('playing');
   const nb=s.score>best;if(nb){best=s.score;try{localStorage.setItem('roomraid-best',best)}catch(e){}}
   $('oScore').textContent=s.score;$('oWave').textContent=s.wave;$('oKills').textContent=s.kills;
   $('oBest').textContent=nb?'New best score.':'Best: '+best;$('bestStart').textContent=best;
@@ -378,7 +387,10 @@ function update(dt){
   if(s.reloadT>0){s.reloadT-=dt;if(s.reloadT<=0){s.reloadT=0;s.ammo=MAG}}
   s.muzzle=Math.max(0,s.muzzle-dt);s.recoil*=Math.pow(.0005,dt);s.hitT-=dt;s.hurt=Math.max(0,s.hurt-dt);
   if(s.clearT>0){s.clearT-=dt;if(s.clearT<=0)nextWave()}
-  else if(s.toSpawn>0){s.spawnT-=dt;if(s.spawnT<=0){spawn();s.toSpawn--;s.spawnT=s.interval*(.6+Math.random()*.8)}}
+  else if(s.toSpawn>0){
+    const wait=V.ready&&!entrances().length;
+    if(wait!==!!s.waiting){s.waiting=wait;$('hint').classList.toggle('show',wait)}
+    if(!wait){s.spawnT-=dt;if(s.spawnT<=0){spawn();s.toSpawn--;s.spawnT=s.interval*(.6+Math.random()*.8)}}}
   else if(!s.enemies.some(e=>e.st!=='dead')){const b=250*s.wave;s.score+=b;s.hp=Math.min(100,s.hp+15);banner('WAVE '+s.wave+' CLEAR','+'+b+' bonus · armor +15');s.clearT=3}
   for(const e of s.enemies){
     e.t+=dt;
@@ -562,7 +574,7 @@ $('reload').addEventListener('pointerdown',e=>{e.stopPropagation();startReload()
 $('pauseBtn').addEventListener('pointerdown',e=>{e.stopPropagation();pause()});
 function pause(){if(!running||st.over)return;paused=true;$('pauseOv').hidden=false}
 $('resumeBtn').onclick=()=>{paused=false;$('pauseOv').hidden=true;last=performance.now()};
-$('quitBtn').onclick=()=>{paused=false;running=false;st=null;document.body.classList.remove('playing');$('pauseOv').hidden=true;$('startOv').hidden=false};
+$('quitBtn').onclick=()=>{$('hint').classList.remove('show');paused=false;running=false;st=null;document.body.classList.remove('playing');$('pauseOv').hidden=true;$('startOv').hidden=false};
 $('againBtn').onclick=()=>{$('overOv').hidden=true;newGame()};
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pause()});
 
