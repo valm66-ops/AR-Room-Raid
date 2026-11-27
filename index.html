@@ -34,7 +34,8 @@ body.playing .hud{display:flex}
 #banner h2{font-size:40px;line-height:1;letter-spacing:.02em}
 #banner p{font-size:17px;color:#ffb3ab;margin-top:6px}
 #vbar{top:calc(env(safe-area-inset-top) + 62px);left:12px;right:12px;justify-content:center;gap:8px;align-items:center}
-#vs{font-size:12px;font-weight:500;padding:4px 10px}
+#vs,#ts{font-size:12px;font-weight:500;padding:4px 10px}
+#vbar{flex-wrap:wrap}
 #ovBtn{pointer-events:auto;height:30px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:var(--glass);color:var(--ink);font:700 12px 'Chakra Petch',sans-serif}
 #ovBtn[aria-pressed=true]{border-color:#3fd0ff;color:#3fd0ff}
 #vsStart{font-size:13px;opacity:.8;margin-top:10px}
@@ -75,7 +76,7 @@ body.playing .hud{display:flex}
   <div id="hpBox"><span class="lbl">Armor <span id="hpNum">100</span></span><div id="hpBar"><div id="hpFill"></div></div></div>
   <div id="right"><div class="chip"><span class="lbl">Wave</span><span class="big" id="wave">1</span></div><button id="pauseBtn" aria-label="Pause">II</button></div>
 </div>
-<div class="hud" id="vbar"><span class="chip" id="vs">Vision: starting…</span><button id="ovBtn" aria-pressed="true">OVERLAY</button></div>
+<div class="hud" id="vbar"><span class="chip" id="vs">Vision: starting…</span><span class="chip" id="ts">Walk: off</span><button id="ovBtn" aria-pressed="true">OVERLAY</button></div>
 <div class="hud" id="bottom">
   <div id="ammo" class="chip"><span class="lbl">Ammo</span><span class="big" id="ammoN">12</span><span> / 12</span></div>
   <button id="reload">RELOAD</button>
@@ -89,10 +90,11 @@ body.playing .hud{display:flex}
     <h1>ROOM <span>RAID</span></h1>
     <p class="tag">They're coming through your house. Turn, aim, hold your ground.</p>
     <ol>
-      <li><b>1</b>Stand in a clear spot with room to turn all the way around.</li>
+      <li><b>1</b>Clear your path. Watch where you walk; the screen is not your eyes.</li>
       <li><b>2</b>Hold your phone upright in portrait, camera facing out.</li>
       <li><b>3</b>Turn your body to aim. Tap anywhere to fire.</li>
-      <li><b>4</b>Point at hallways and doorways: that's where they come from. The overlay shows what the game sees (blue floor, orange doors).</li>
+      <li><b>4</b>Walk around freely. The game tracks your position; take a step and tilt toward the floor once so it can calibrate.</li>
+      <li><b>5</b>Point at hallways and doorways: that's where they come from. The overlay shows what the game sees (blue floor, orange doors).</li>
     </ol>
     <div class="row"><span>Camera FOV</span><input type="range" id="fov1" min="40" max="100" step="1"><output id="fov1v"></output></div>
     <button class="btn" id="startBtn">START</button>
@@ -157,7 +159,9 @@ function frameCam(){
   if(camOn&&video.videoWidth){const vw=video.videoWidth,vh=video.videoHeight,k=Math.max(W/vw,H/vh);L=Math.max(vw,vh)*k}
   F=(L/2)/Math.tan(fov*D2R/2);
 }
+const P={x:0,y:0};
 function proj(x,y,z){
+  x-=P.x;y-=P.y;
   const dx=R[0]*x+R[3]*y+R[6]*z,dy=R[1]*x+R[4]*y+R[7]*z,dz=R[2]*x+R[5]*y+R[8]*z,f=-dz;
   if(f<0.08)return null;
   const sx=sc*dx+ss*dy,sy=-ss*dx+sc*dy;
@@ -175,11 +179,15 @@ let T=null,segP=null,depP=null,classMap=null;
 const capCv=document.createElement('canvas'),capCtx=capCv.getContext('2d',{willReadFrequently:true});
 const maskCv=document.createElement('canvas'),maskCtx=maskCv.getContext('2d');
 const ovCv=document.createElement('canvas'),ovCtx=ovCv.getContext('2d');
-const BINS=36,bins=Array.from({length:BINS},()=>({far:null,door:null,maxR:0}));
+const marks=[];
+function addMark(k,x,y,now){
+  for(const m of marks)if(m.k===k&&Math.hypot(m.x-x,m.y-y)<.9){m.x=m.x*.7+x*.3;m.y=m.y*.7+y*.3;m.t=now;m.n++;return}
+  marks.push({k,x,y,t:now,n:1});if(marks.length>60)marks.splice(marks.reduce((bi,m,i)=>m.t<marks[bi].t?i:bi,0),1);
+}
 function setVS(t){$('vs').textContent=t;$('vsStart').textContent=t}
 const shortErr=e=>String(e&&e.message||e).slice(0,70);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function snapPose(){return{R:R.slice(),sc,ss,F,W,H,t:performance.now()}}
+function snapPose(){return{R:R.slice(),sc,ss,F,W,H,t:performance.now(),px:P.x,py:P.y}}
 function rayDir(p,u,v){const x=(u-p.W/2)/p.F,y=-(v-p.H/2)/p.F,dx=p.sc*x-p.ss*y,dy=p.ss*x+p.sc*y,r=p.R;
   return[r[0]*dx+r[1]*dy-r[2],r[3]*dx+r[4]*dy-r[5],r[6]*dx+r[7]*dy-r[8]]}
 function sizes(){const asp=Math.min(2.6,Math.max(.4,H/W));
@@ -254,18 +262,19 @@ function processFrame(pose,{lab,lw,lh,disp,dw,dh}){
   if(m>40){const den=m*sxx-sx*sx;if(den>1e-6){const a=(m*sxy-sx*sy)/den,b=(sy-a*sx)/m;if(a>0){V.a=a;V.b=b}}}
   // everything else: calibrated depth
   if(V.a>0)for(let k=0;k<n;k++){if(pl[k])continue;const q=D[k]-V.b;tg[k]=q>.5?Math.min(60,Math.max(.3,V.a/q)):60}
-  // spawn memory: farthest floor + door bases, by heading
-  const now=performance.now();
+  // entrances: door bases + deep floor (hallways), stored as world landmarks
+  const now=performance.now(),G=8,fb=new Array(G).fill(null),db=new Array(G).fill(null);
   for(let i=0;i<lw;i++){
     let best=-1,bt=0,door=-1;
     for(let j=lh-1;j>=0;j--){const k=j*lw+i;
       if(pl[k]&&tg[k]>bt){bt=tg[k];best=k}
       if(door<0&&lab[k]===DOOR&&j<lh-1&&pl[k+lw])door=k+lw}
-    if(best>=0&&bt>1.5){const x=dirs[best*3]*bt,y=dirs[best*3+1]*bt,r=Math.hypot(x,y),b=bins[binOf(Math.atan2(y,x))];
-      if(r>b.maxR)b.maxR=r;if(!b.far||r>b.far.r||now-b.far.t>8000)b.far={x,y,r,t:now}}
-    if(door>=0&&tg[door]>1.2){const t=tg[door],x=dirs[door*3]*t,y=dirs[door*3+1]*t,r=Math.hypot(x,y),b=bins[binOf(Math.atan2(y,x))];
-      if(!b.door||now-b.door.t>3000||r>b.door.r)b.door={x,y,r,t:now}}
+    const gi=Math.min(G-1,Math.floor(i/lw*G));
+    if(best>=0&&(!fb[gi]||bt>fb[gi].t))fb[gi]={k:best,t:bt,door:door>=0?tg[door]:0};
+    if(door>=0&&tg[door]>1.2&&(!db[gi]||tg[door]>db[gi].t))db[gi]={k:door,t:tg[door]};
   }
+  for(const f of fb){if(!f)continue;if(f.t>=4.2||(f.door&&f.t>f.door+.8))addMark('hall',pose.px+dirs[f.k*3]*f.t,pose.py+dirs[f.k*3+1]*f.t,now)}
+  for(const d of db){if(!d)continue;addMark('door',pose.px+dirs[d.k*3]*d.t,pose.py+dirs[d.k*3+1]*d.t,now)}
   // overlay image
   ovCv.width=lw;ovCv.height=lh;const od=ovCtx.createImageData(lw,lh),o=od.data;
   for(let k=0;k<n;k++){const l=lab[k],p=k*4;
@@ -273,13 +282,14 @@ function processFrame(pose,{lab,lw,lh,disp,dw,dh}){
   ovCtx.putImageData(od,0,0);
   V.frame={pose,lab,lw,lh,tg};
 }
-const binOf=a=>((Math.floor((a+Math.PI)/(2*Math.PI)*BINS)%BINS)+BINS)%BINS;
 function entrances(){
   const now=performance.now(),c=[];
-  for(let i=0;i<BINS;i++){const b=bins[i];
-    const d=b.door&&now-b.door.t<120000?b.door:null;
-    if(d)c.push({p:d,k:'door',w:3,wp:null});
-    if(b.far&&now-b.far.t<120000&&(b.far.r>=4.2||(d&&b.far.r>d.r+.8)))c.push({p:b.far,k:'hall',w:2.5,wp:d&&d.r<b.far.r-.8?d:null})}
+  for(const m of marks){if(now-m.t>120000)continue;const r=Math.hypot(m.x-P.x,m.y-P.y);if(r<1.8)continue;
+    let wp=null;
+    if(m.k==='hall'){let bd=1e9;for(const d of marks){if(d.k!=='door'||now-d.t>120000)continue;
+      const ax=m.x-P.x,ay=m.y-P.y,bx=d.x-P.x,by=d.y-P.y,t=(ax*bx+ay*by)/(r*r);if(t<.15||t>.92)continue;
+      const off=Math.abs(ax*by-ay*bx)/r;if(off<1.3&&off<bd){bd=off;wp=d}}}
+    c.push({p:m,k:m.k,w:m.k==='door'?3:2.5,wp})}
   return c;
 }
 function pickSpawn(){
@@ -288,7 +298,7 @@ function pickSpawn(){
   let s=c.reduce((a,x)=>a+x.w,0)*Math.random();for(const x of c){s-=x.w;if(s<=0)return x}return c[0];
 }
 function capAffine(p){
-  const q=[[p.W/2,p.H/2],[p.W/2+100,p.H/2],[p.W/2,p.H/2+100]].map(([u,v])=>{const w=rayDir(p,u,v);return proj(w[0]*10,w[1]*10,w[2]*10)});
+  const q=[[p.W/2,p.H/2],[p.W/2+100,p.H/2],[p.W/2,p.H/2+100]].map(([u,v])=>{const w=rayDir(p,u,v);return proj(p.px+w[0]*10,p.py+w[1]*10,w[2]*10)});
   if(q.some(x=>!x))return null;
   const a=(q[1].x-q[0].x)/100,b=(q[1].y-q[0].y)/100,c=(q[2].x-q[0].x)/100,d=(q[2].y-q[0].y)/100;
   return{a,b,c,d,e:q[0].x-a*p.W/2-c*p.H/2,f:q[0].y-b*p.W/2-d*p.H/2};
@@ -298,7 +308,59 @@ function buildOcc(fr,ed){
   for(let k=0;k<lw*lh;k++)if(lab[k]!==FLOOR&&tg[k]<ed-.35){o[k*4+3]=255;any=true}
   if(!any)return false;maskCtx.putImageData(im,0,0);return true;
 }
-window.__vision={V,processFrame,snapPose,bins,pickSpawn};
+window.__vision={V,processFrame,snapPose,marks,pickSpawn,P,get TR(){return TR}};
+
+/* ---------- walking: visual SLAM (AlvaAR, GPL-3) gives position ---------- */
+const TR={alva:null,w:0,h:0,s:0,prev:null,miss:0,n:0,fps:0,state:'off',err:'',last:0,cal:0};
+const slamCv=document.createElement('canvas'),slamCtx=slamCv.getContext('2d',{willReadFrequently:true});
+function setTS(t){$('ts').textContent=t}
+async function initTracking(){
+  if(TR.alva||TR.state==='loading')return;
+  TR.state='loading';setTS('Walk: loading tracker…');
+  try{
+    const m=await import('./alva_ar.js');
+    TR.w=360;TR.h=Math.round(360*H/W/2)*2;slamCv.width=TR.w;slamCv.height=TR.h;
+    const hfov=2*Math.atan((W/2)/F)/D2R;
+    TR.alva=await m.AlvaAR.Initialize(TR.w,TR.h,hfov);TR.state='init';setTS('Walk: take a step to start tracking');
+  }catch(e){TR.state='error';TR.err=shortErr(e);setTS('Walk off · '+TR.err)}
+}
+function q2m(x,y,z,w){return[1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w),2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w),2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)]}
+function m2q(m){const tr=m[0]+m[4]+m[8];let x,y,z,w;
+  if(tr>0){const S=Math.sqrt(tr+1)*2;w=.25*S;x=(m[7]-m[5])/S;y=(m[2]-m[6])/S;z=(m[3]-m[1])/S}
+  else if(m[0]>m[4]&&m[0]>m[8]){const S=Math.sqrt(1+m[0]-m[4]-m[8])*2;w=(m[7]-m[5])/S;x=.25*S;y=(m[1]+m[3])/S;z=(m[2]+m[6])/S}
+  else if(m[4]>m[8]){const S=Math.sqrt(1+m[4]-m[0]-m[8])*2;w=(m[2]-m[6])/S;x=(m[1]+m[3])/S;y=.25*S;z=(m[5]+m[7])/S}
+  else{const S=Math.sqrt(1+m[8]-m[0]-m[4])*2;w=(m[3]-m[1])/S;x=(m[2]+m[6])/S;y=(m[5]+m[7])/S;z=.25*S}return[x,y,z,w]}
+// AlvaAR pose (column-major 4x4) -> rotation (device->slam) and position, using the same convention as its THREE connector
+function poseToRT(p){const m=[p[0],p[4],p[8],p[1],p[5],p[9],p[2],p[6],p[10]],q=m2q(m);return{Rs:q2m(-q[0],q[1],q[2],q[3]),t:[p[12],-p[13],-p[14]]}}
+function slamToWorld(Rs){const M=new Array(9);for(let i=0;i<3;i++)for(let j=0;j<3;j++)M[i*3+j]=R[i*3]*Rs[j*3]+R[i*3+1]*Rs[j*3+1]+R[i*3+2]*Rs[j*3+2];return M}
+const mul=(M,v)=>[M[0]*v[0]+M[1]*v[1]+M[2]*v[2],M[3]*v[0]+M[4]*v[1]+M[5]*v[2],M[6]*v[0]+M[7]*v[1]+M[8]*v[2]];
+function trackStep(){
+  if(!TR.alva||!camOn||!video.videoWidth)return;
+  const t0=performance.now();
+  const vw=video.videoWidth,vh=video.videoHeight,k=Math.max(W/vw,H/vh),cw=W/k,ch=H/k;
+  slamCtx.drawImage(video,(vw-cw)/2,(vh-ch)/2,cw,ch,0,0,TR.w,TR.h);
+  const pose=TR.alva.findCameraPose(slamCtx.getImageData(0,0,TR.w,TR.h));
+  TR.fps=TR.fps*.8+.2*(1000/Math.max(1,t0-TR.last));TR.last=t0;
+  if(!pose){TR.prev=null;TR.miss++;
+    if(TR.miss>20&&TR.s){TR.s=0;TR.cal=0}
+    setTS(TR.state==='init'?'Walk: take a step to start tracking':'Walk: lost · aim at something with detail');return}
+  if(TR.state==='init')TR.state='track';TR.miss=0;TR.n++;
+  const{Rs,t}=poseToRT(pose),M=slamToWorld(Rs);
+  // scale: camera height above the SLAM floor plane = EYE
+  if(TR.n%15===0){const pp=TR.alva.findPlane();
+    if(pp){const pr=poseToRT(pp),pc=[t[0]-pr.t[0],t[1]-pr.t[1],t[2]-pr.t[2]];let best=null;
+      for(let a=0;a<3;a++){const n=[pr.Rs[a],pr.Rs[3+a],pr.Rs[6+a]],nw=mul(M,n);if(!best||Math.abs(nw[2])>Math.abs(best.nw[2]))best={n,nw}}
+      if(Math.abs(best.nw[2])>.85){const hgt=Math.abs(pc[0]*best.n[0]+pc[1]*best.n[1]+pc[2]*best.n[2]);
+        if(hgt>1e-4){const sn=EYE/hgt;TR.s=TR.s?TR.s*.8+sn*.2:sn;TR.cal++}}}}
+  if(TR.prev&&TR.s){const d=mul(M,[t[0]-TR.prev[0],t[1]-TR.prev[1],t[2]-TR.prev[2]]),dx=d[0]*TR.s,dy=d[1]*TR.s;
+    if(Math.hypot(dx,dy)<.5){P.x+=dx;P.y+=dy}}
+  TR.prev=t;
+  setTS(TR.s?'Walk: tracking '+TR.fps.toFixed(0)+'/s':'Walk: calibrating · tilt down at the floor');
+}
+// desktop testing: WASD walks
+const keys={};addEventListener('keydown',e=>keys[e.code]=1);addEventListener('keyup',e=>keys[e.code]=0);
+function keyWalk(dt){const h=heading(),f=(keys.KeyW?1:0)-(keys.KeyS?1:0),r=(keys.KeyD?1:0)-(keys.KeyA?1:0);if(!f&&!r)return;
+  P.x+=(Math.cos(h)*f+Math.sin(h)*r)*1.4*dt;P.y+=(Math.sin(h)*f-Math.cos(h)*r)*1.4*dt}
 
 /* ---------- audio ---------- */
 let AC=null,NB=null;
@@ -334,8 +396,8 @@ function nextWave(){
 function spawn(){
   const s=st,n=s.wave,spread=n===1?.9:n===2?1.8:Math.PI;
   const pk=pickSpawn();let x,y,wp=null;
-  if(pk){const j=(Math.random()-.5)*(pk.k==='door'?.25:.5),r=Math.hypot(pk.p.x,pk.p.y),ux=pk.p.x/r,uy=pk.p.y/r,f=pk.k==='door'?1.04:.95;x=pk.p.x*f-uy*j;y=pk.p.y*f+ux*j;wp=pk.wp?{x:pk.wp.x,y:pk.wp.y}:null}
-  else{const a=heading()+(Math.random()*2-1)*spread,b=bins[binOf(a)],r=b.maxR>2?b.maxR*.9:3.5;x=Math.cos(a)*r;y=Math.sin(a)*r}
+  if(pk){const rx=pk.p.x-P.x,ry=pk.p.y-P.y,j=(Math.random()-.5)*(pk.k==='door'?.25:.5),r=Math.hypot(rx,ry),ux=rx/r,uy=ry/r,f=pk.k==='door'?1.04:.95;x=P.x+rx*f-uy*j;y=P.y+ry*f+ux*j;wp=pk.wp?{x:pk.wp.x,y:pk.wp.y}:null}
+  else{const a=heading()+(Math.random()*2-1)*spread;x=P.x+Math.cos(a)*3.5;y=P.y+Math.sin(a)*3.5}
   const drone=n>=2&&Math.random()<Math.min(.45,.12*n);
   s.enemies.push({type:drone?'drone':'grunt',x,y,wp,z:0,hp:drone?1:3,spawn:.9,
     sp:drone?Math.min(2.4,1.1+.12*n):Math.min(1.3,.45+.07*n),t:0,ph:Math.random()*6,seed:Math.random()*6,atk:.4,swing:0,flash:0,st:'live',dt:0,sc:null});
@@ -397,7 +459,7 @@ function update(dt){
     if(e.st==='dead'){e.dt+=dt;continue}
     if(e.spawn>0){e.spawn-=dt;e.z=-.15;continue}
     e.flash=Math.max(0,e.flash-dt);e.swing=Math.max(0,e.swing-dt);
-    const d=Math.hypot(e.x,e.y);let nx=-e.x/d,ny=-e.y/d;
+    const ex=e.x-P.x,ey=e.y-P.y,d=Math.hypot(ex,ey);let nx=-ex/d,ny=-ey/d;
     if(e.wp){const wx=e.wp.x-e.x,wy=e.wp.y-e.y,wd=Math.hypot(wx,wy);if(wd<.35)e.wp=null;else{nx=wx/wd;ny=wy/wd}}
     if(e.type==='grunt'){
       if(d>1.2){const w=e.wp?0:Math.sin(e.t*1.3+e.seed)*.3;e.x+=(nx-ny*w)*e.sp*dt;e.y+=(ny+nx*w)*e.sp*dt;e.ph+=dt*e.sp*5}
@@ -475,7 +537,7 @@ function drawWorld(){
   const fr=V.frame,A=fr&&camOn?capAffine(fr.pose):null;
   if(A&&V.show){ctx.save();ctx.setTransform(DPR*A.a,DPR*A.b,DPR*A.c,DPR*A.d,DPR*A.e,DPR*A.f);ctx.imageSmoothingEnabled=true;ctx.globalAlpha=1;ctx.drawImage(ovCv,0,0,fr.pose.W,fr.pose.H);ctx.restore();
     const now=performance.now();
-    for(const b of bins)for(const[p,col]of[[b.far,'#3fd0ff'],[b.door,'#ff9628']]){if(!p||now-p.t>90000)continue;const q=proj(p.x,p.y,-EYE);if(!q)continue;const r=Math.max(4,F*.12/q.d);
+    for(const p of marks){if(now-p.t>120000)continue;const col=p.k==='door'?'#ff9628':'#3fd0ff';const q=proj(p.x,p.y,-EYE);if(!q)continue;const r=Math.max(4,F*.12/q.d);
       ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(q.x,q.y,r,r*.3,0,0,7);ctx.stroke()}}
   if(!st)return;
   const vis=[];
@@ -511,7 +573,7 @@ function drawHUD(t){
   let L=0,Rt=0;
   for(const e of s.enemies){if(e.st==='dead')continue;const c=e.sc;
     const on=c&&(c.k==='g'?(c.fx>0&&c.fx<W&&c.fy-c.h<H&&c.fy>0):(c.x>0&&c.x<W&&c.y>0&&c.y<H));if(on)continue;
-    const rel=wrap(Math.atan2(e.y,e.x)-h),cl=1-Math.min(1,Math.hypot(e.x,e.y)/RANGE);
+    const rel=wrap(Math.atan2(e.y-P.y,e.x-P.x)-h),cl=1-Math.min(1,Math.hypot(e.x-P.x,e.y-P.y)/RANGE);
     if(rel>0)L=Math.max(L,cl+.15);else Rt=Math.max(Rt,cl+.15)}
   for(const[side,v]of[[-1,L],[1,Rt]]){if(!v)continue;const x=side<0?16:W-16,pulse=.6+.4*Math.sin(t*8);
     ctx.fillStyle='rgba(255,59,47,'+Math.min(1,v*pulse)+')';ctx.beginPath();ctx.moveTo(x,cy);ctx.lineTo(x-side*18,cy-22);ctx.lineTo(x-side*18,cy+22);ctx.closePath();ctx.fill()}
@@ -522,7 +584,7 @@ function drawHUD(t){
   ctx.beginPath();ctx.arc(0,0,r/2,0,7);ctx.stroke();
   const hf=Math.atan(W/2/F);ctx.fillStyle='rgba(255,255,255,.1)';ctx.beginPath();ctx.moveTo(0,0);ctx.arc(0,0,r,-Math.PI/2-hf,-Math.PI/2+hf);ctx.closePath();ctx.fill();
   const sw=t*2.5;ctx.strokeStyle='rgba(255,59,47,.5)';ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(Math.cos(sw)*r,Math.sin(sw)*r);ctx.stroke();
-  for(const e of s.enemies){if(e.st==='dead')continue;const rel=wrap(Math.atan2(e.y,e.x)-h),d=Math.min(RANGE,Math.hypot(e.x,e.y))/RANGE*r;
+  for(const e of s.enemies){if(e.st==='dead')continue;const rel=wrap(Math.atan2(e.y-P.y,e.x-P.x)-h),d=Math.min(RANGE,Math.hypot(e.x-P.x,e.y-P.y))/RANGE*r;
     ctx.fillStyle=e.type==='drone'?'#ffd2c2':'#ff3b2f';ctx.beginPath();ctx.arc(-Math.sin(rel)*d,-Math.cos(rel)*d,e.type==='drone'?3:4,0,7);ctx.fill()}
   ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(0,0,3,0,7);ctx.fill();ctx.restore();
   // gun
@@ -554,6 +616,7 @@ let last=performance.now();
 function loop(now){
   const dt=Math.min(.05,(now-last)/1000);last=now;
   frameCam();
+  if(running&&!paused){TR.tick=(TR.tick||0)+1;if(TR.tick%2===0)try{trackStep()}catch(e){TR.err=shortErr(e);setTS('Walk error · '+TR.err)}keyWalk(dt)}
   if(running&&!paused&&st&&!st.over)update(dt);
   ctx.clearRect(0,0,W,H);
   if(!camOn)drawBackdrop();
@@ -582,7 +645,7 @@ $('startBtn').onclick=async()=>{
   initAudio();
   await startMotion();
   await startCam();
-  $('startOv').hidden=true;newGame();
+  $('startOv').hidden=true;newGame();initTracking();
   setTimeout(()=>{
     if(!camOn)toast('Camera: '+camErr);
     else if(!gyro)toast('Motion: '+(motErr||'no sensor events')+' · drag to look');
