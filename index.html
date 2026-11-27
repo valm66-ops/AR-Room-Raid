@@ -260,8 +260,21 @@ function processFrame(pose,{lab,lw,lh,disp,dw,dh}){
   for(let k=0;k<n;k++){if(lab[k]!==FLOOR)continue;const wz=dirs[k*3+2];if(wz>-.04)continue;
     const t=EYE/-wz;if(t>10)continue;tg[k]=t;pl[k]=1;const x=1/t,y=D[k];sx+=x;sy+=y;sxx+=x*x;sxy+=x*y;m++}
   if(m>40){const den=m*sxx-sx*sx;if(den>1e-6){const a=(m*sxy-sx*sy)/den,b=(sy-a*sx)/m;if(a>0){V.a=a;V.b=b}}}
-  // everything else: calibrated depth
+  // everything else: calibrated mono depth first...
   if(V.a>0)for(let k=0;k<n;k++){if(pl[k])continue;const q=D[k]-V.b;tg[k]=q>.5?Math.min(60,Math.max(.3,V.a/q)):60}
+  // ...then exact geometry: anything standing on the floor is as far as the spot where it touches the floor.
+  // Walls, doorframes and furniture get a sharp, reliable depth per column, and that contact point is an obstacle on the nav map.
+  for(let i=0;i<lw;i++){
+    let contact=0;
+    for(let j=lh-1;j>=0;j--){const k=j*lw+i;
+      if(pl[k]){contact=0;const t=tg[k];navMark(pose.px+dirs[k*3]*t,pose.py+dirs[k*3+1]*t,-1);
+        if(j>0&&!pl[k-lw]){const kk=k-lw;contact=t;
+          if(lab[kk]!==DOOR){const tc=t+.12;navMark(pose.px+dirs[kk*3]*tc,pose.py+dirs[kk*3+1]*tc,3)}}
+        continue}
+      if(contact>0){const mono=tg[k];tg[k]=(mono<60&&mono>contact+1)?mono:contact}
+    }
+  }
+  navRebuild();
   // entrances: door bases + deep floor (hallways), stored as world landmarks
   const now=performance.now(),G=8,fb=new Array(G).fill(null),db=new Array(G).fill(null);
   for(let i=0;i<lw;i++){
@@ -281,6 +294,38 @@ function processFrame(pose,{lab,lw,lh,disp,dw,dh}){
     if(l===FLOOR){o[p]=40;o[p+1]=200;o[p+2]=255;o[p+3]=95}else if(l===DOOR){o[p]=255;o[p+1]=150;o[p+2]=40;o[p+3]=120}else if(l===WALL){o[p]=180;o[p+1]=120;o[p+2]=255;o[p+3]=28}}
   ovCtx.putImageData(od,0,0);
   V.frame={pose,lab,lw,lh,tg};
+}
+/* ---------- nav map: floor seen = free, wall/furniture contact = blocked ---------- */
+const GR=.25,GN=160,GO=GN/2,nav=new Int8Array(GN*GN),blk=new Uint8Array(GN*GN);
+const cellOf=(x,y)=>{const i=Math.floor(x/GR)+GO,j=Math.floor(y/GR)+GO;return(i<0||j<0||i>=GN||j>=GN)?-1:j*GN+i};
+function navMark(x,y,v){const c=cellOf(x,y);if(c<0)return;nav[c]=Math.max(-8,Math.min(8,nav[c]+v))}
+function navRebuild(){blk.fill(0);for(let c=0;c<GN*GN;c++)if(nav[c]>2){blk[c]=2;const i=c%GN,j=(c/GN)|0;
+  for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){const a=i+di,b=j+dj;if(a>=0&&b>=0&&a<GN&&b<GN&&!blk[b*GN+a])blk[b*GN+a]=1}}}
+function losClear(x0,y0,x1,y1){const d=Math.hypot(x1-x0,y1-y0),n=Math.ceil(d/(GR*.5));
+  for(let i=1;i<n;i++){const c=cellOf(x0+(x1-x0)*i/n,y0+(y1-y0)*i/n);if(c>=0&&blk[c])return false}return true}
+function findPath(x0,y0,x1,y1){
+  const s=cellOf(x0,y0),g=cellOf(x1,y1);if(s<0||g<0)return null;
+  const gi=g%GN,gj=(g/GN)|0,si=s%GN,sj=(s/GN)|0,pad=12,
+    i0=Math.max(0,Math.min(si,gi)-pad),i1=Math.min(GN-1,Math.max(si,gi)+pad),j0=Math.max(0,Math.min(sj,gj)-pad),j1=Math.min(GN-1,Math.max(sj,gj)+pad);
+  const gs=new Map(),from=new Map(),heap=[];const h=c=>Math.hypot(c%GN-gi,((c/GN)|0)-gj);
+  const push=(c,f)=>{heap.push([f,c]);let i=heap.length-1;while(i>0){const p=(i-1)>>1;if(heap[p][0]<=heap[i][0])break;[heap[p],heap[i]]=[heap[i],heap[p]];i=p}};
+  const pop=()=>{const top=heap[0],last=heap.pop();if(heap.length){heap[0]=last;let i=0;for(;;){const l=2*i+1,r=l+1;let m=i;if(l<heap.length&&heap[l][0]<heap[m][0])m=l;if(r<heap.length&&heap[r][0]<heap[m][0])m=r;if(m===i)break;[heap[m],heap[i]]=[heap[i],heap[m]];i=m}}return top};
+  gs.set(s,0);push(s,h(s));let it=0;
+  while(heap.length&&it++<6000){const[,c]=pop();if(c===g)break;const ci=c%GN,cj=(c/GN)|0,gc=gs.get(c);
+    for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){if(!di&&!dj)continue;const a=ci+di,b=cj+dj;if(a<i0||a>i1||b<j0||b>j1)continue;
+      const nc=b*GN+a;if(blk[nc]&&nc!==g)continue;if(di&&dj&&(blk[cj*GN+a]||blk[b*GN+ci]))continue;
+      const cost=gc+(di&&dj?1.414:1)*(nav[nc]<0?1:1.4);if(cost<(gs.has(nc)?gs.get(nc):1e9)){gs.set(nc,cost);from.set(nc,c);push(nc,cost+h(nc))}}}
+  if(!from.has(g))return null;
+  const path=[];for(let c=g;c!==s;c=from.get(c))path.push({x:((c%GN)-GO+.5)*GR,y:(((c/GN)|0)-GO+.5)*GR});
+  return path.reverse();
+}
+function steer(e,tx,ty,dt){
+  e.repath=(e.repath||0)-dt;
+  if(e.repath<=0){e.path=findPath(e.x,e.y,tx,ty);e.repath=.5+Math.random()*.3}
+  if(!e.path||!e.path.length||losClear(e.x,e.y,tx,ty))return[tx,ty];
+  while(e.path.length>1&&losClear(e.x,e.y,e.path[1].x,e.path[1].y))e.path.shift();
+  const p=e.path[0];if(Math.hypot(p.x-e.x,p.y-e.y)<.2&&e.path.length>1)e.path.shift();
+  return[e.path[0].x,e.path[0].y];
 }
 function entrances(){
   const now=performance.now(),c=[];
@@ -305,10 +350,10 @@ function capAffine(p){
 }
 function buildOcc(fr,ed){
   const{lw,lh,lab,tg}=fr;maskCv.width=lw;maskCv.height=lh;const im=maskCtx.createImageData(lw,lh),o=im.data;let any=false;
-  for(let k=0;k<lw*lh;k++)if(lab[k]!==FLOOR&&tg[k]<ed-.35){o[k*4+3]=255;any=true}
+  for(let k=0;k<lw*lh;k++)if(lab[k]!==FLOOR&&tg[k]<ed-.15){o[k*4+3]=255;any=true}
   if(!any)return false;maskCtx.putImageData(im,0,0);return true;
 }
-window.__vision={V,processFrame,snapPose,marks,pickSpawn,P,get TR(){return TR}};
+window.__vision={V,processFrame,snapPose,marks,pickSpawn,P,get TR(){return TR},get st(){return st},blk,cellOf,findPath};
 
 /* ---------- walking: visual SLAM (AlvaAR, GPL-3) gives position ---------- */
 const TR={alva:null,w:0,h:0,s:0,prev:null,miss:0,n:0,fps:0,state:'off',err:'',last:0,cal:0};
@@ -460,13 +505,15 @@ function update(dt){
     if(e.spawn>0){e.spawn-=dt;e.z=-.15;continue}
     e.flash=Math.max(0,e.flash-dt);e.swing=Math.max(0,e.swing-dt);
     const ex=e.x-P.x,ey=e.y-P.y,d=Math.hypot(ex,ey);let nx=-ex/d,ny=-ey/d;
-    if(e.wp){const wx=e.wp.x-e.x,wy=e.wp.y-e.y,wd=Math.hypot(wx,wy);if(wd<.35)e.wp=null;else{nx=wx/wd;ny=wy/wd}}
+    if(e.wp&&Math.hypot(e.wp.x-e.x,e.wp.y-e.y)<.35)e.wp=null;
+    {const[tx,ty]=steer(e,e.wp?e.wp.x:P.x,e.wp?e.wp.y:P.y,dt),sx=tx-e.x,sy=ty-e.y,sd=Math.hypot(sx,sy);if(sd>.05){nx=sx/sd;ny=sy/sd}}
+    const free=!e.path||e.path.length<2;
     if(e.type==='grunt'){
-      if(d>1.2){const w=e.wp?0:Math.sin(e.t*1.3+e.seed)*.3;e.x+=(nx-ny*w)*e.sp*dt;e.y+=(ny+nx*w)*e.sp*dt;e.ph+=dt*e.sp*5}
+      if(d>1.2){const w=(e.wp||!free)?0:Math.sin(e.t*1.3+e.seed)*.3;e.x+=(nx-ny*w)*e.sp*dt;e.y+=(ny+nx*w)*e.sp*dt;e.ph+=dt*e.sp*5}
       else{e.atk-=dt;if(e.atk<=0){e.atk=1.1;e.swing=.3;hurt(7);if(s.over)return}}
     }else{
       e.z=-.15+Math.sin(e.t*2.5+e.seed)*.25;
-      if(d>.9){const w=Math.sin(e.t*2+e.seed)*(e.wp?.2:.6);e.x+=(nx-ny*w)*e.sp*dt;e.y+=(ny+nx*w)*e.sp*dt}
+      if(d>.9){const w=Math.sin(e.t*2+e.seed)*((e.wp||!free)?.1:.6);e.x+=(nx-ny*w)*e.sp*dt;e.y+=(ny+nx*w)*e.sp*dt}
       else{kill(e,false,true);hurt(15);if(s.over)return}
     }
   }
@@ -537,6 +584,9 @@ function drawWorld(){
   const fr=V.frame,A=fr&&camOn?capAffine(fr.pose):null;
   if(A&&V.show){ctx.save();ctx.setTransform(DPR*A.a,DPR*A.b,DPR*A.c,DPR*A.d,DPR*A.e,DPR*A.f);ctx.imageSmoothingEnabled=true;ctx.globalAlpha=1;ctx.drawImage(ovCv,0,0,fr.pose.W,fr.pose.H);ctx.restore();
     const now=performance.now();
+    ctx.fillStyle='rgba(255,59,47,.55)';
+    {const ci=Math.floor(P.x/GR)+GO,cj=Math.floor(P.y/GR)+GO;for(let j=Math.max(0,cj-32);j<Math.min(GN,cj+32);j++)for(let i=Math.max(0,ci-32);i<Math.min(GN,ci+32);i++){if(blk[j*GN+i]!==2)continue;
+      const q=proj((i-GO+.5)*GR,(j-GO+.5)*GR,-EYE);if(!q||q.d>9)continue;const r=Math.max(1.5,F*.05/q.d);ctx.fillRect(q.x-r,q.y-r*.4,r*2,r*.8)}}
     for(const p of marks){if(now-p.t>120000)continue;const col=p.k==='door'?'#ff9628':'#3fd0ff';const q=proj(p.x,p.y,-EYE);if(!q)continue;const r=Math.max(4,F*.12/q.d);
       ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();ctx.ellipse(q.x,q.y,r,r*.3,0,0,7);ctx.stroke()}}
   if(!st)return;
